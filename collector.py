@@ -52,7 +52,9 @@ def collect():
         all_trades.extend(trades)
     return all_trades
 
-trades = collect()
-for t in trades:
-    print(t)
+if __name__ == '__main__':
+    trades = collect()
+    for t in trades:
+        print(t)
+
     print(f"\nCollected {len(trades)} trades.")
