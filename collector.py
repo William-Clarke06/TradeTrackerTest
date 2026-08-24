@@ -42,7 +42,7 @@ def parse_trades(html, group):
         }
         trades.append(trade)
 
-    return trades[:10] #First 10
+    return trades[:30] #First 30, sorted by time.
 
 def collect():
     """Run fetch + parse over all 3 sources and combine"""

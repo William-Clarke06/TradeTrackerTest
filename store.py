@@ -91,6 +91,15 @@ def size_tier(entry_price):
     if p < 50:  return '$15-49.99'
     return '$50+'
 
+def value_bucket(insider_value):
+    """Bucket a trade by its dollar size (abs, so sales count too)."""
+    if insider_value is None:
+        return 'unknown'
+    v = abs(insider_value)
+    if v < 100_000:   return '<$100k'
+    if v < 500_000:   return '$100-500k'
+    return 'big bet ($500k+)'
+
 
 def days_between(entry_datetime, other_datetime):
     """Whole days from entry to another timestamp (date-level)."""
@@ -327,16 +336,17 @@ def show_averages():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT source_group, direction, entry_price, entry_datetime,
-               peak_price, peak_datetime, latest_price
+               peak_price, peak_datetime, latest_price, insider_value
         FROM trades
         WHERE entry_price IS NOT NULL AND latest_price IS NOT NULL
     """)
     data = []
-    for group, direction, entry, entry_dt, peak, peak_dt, latest in cursor.fetchall():
+    for group, direction, entry, entry_dt, peak, peak_dt, latest, insider_value in cursor.fetchall():
         data.append({
             'group': group,
             'direction': direction,
             'tier': size_tier(entry),
+            'vbucket': value_bucket(insider_value),
             'cur': pct_move(entry, latest, direction),
             'peak': pct_move(entry, peak, direction),
             'days': days_between(entry_dt, peak_dt),
@@ -357,6 +367,7 @@ def show_averages():
     _print_breakdown("By group:", data, 'group')
     _print_breakdown("By size tier:", data, 'tier')
     _print_breakdown("By direction:", data, 'direction')
+    _print_breakdown("By value:", data, 'vbucket')   # <-- add this line
 
 
 # ----------------------------------------------------------------------------

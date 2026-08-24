@@ -7,7 +7,7 @@ so the %/tier/day-gap logic lives in exactly one place.
 """
 from datetime import datetime
 
-from store import connect, pct_move, size_tier, days_between
+from store import connect, pct_move, size_tier, days_between, value_bucket
 
 REPORT_PATH = 'report.html'
 
@@ -118,12 +118,14 @@ def write_report(path=REPORT_PATH):
         trades.append(dict(tk=tk, grp=grp, dr=dr, tt=tt, iq=iq, ip=ip, iv=iv, fdt=fdt, td=td,
             en=en, edt=edt, pk=pk, pdt=pdt, lt=lt, ldt=ldt, st=st,
             cur=pct_move(en, lt, dr), peak=pct_move(en, pk, dr),
-            days=days_between(edt, pdt), tier=size_tier(en)))
+            days=days_between(edt, pdt), tier=size_tier(en),
+            vbucket=value_bucket(iv)))
     cur.execute("SELECT COUNT(*) FROM trades WHERE entry_price IS NULL")
     pending = cur.fetchone()[0]
     conn.close()
 
     agg = [dict(group=t['grp'], direction=t['dr'], tier=t['tier'],
+                vbucket=t['vbucket'],
                 cur=t['cur'], peak=t['peak'], days=t['days']) for t in trades]
     summaries = ''
     if agg:
@@ -131,6 +133,7 @@ def write_report(path=REPORT_PATH):
         summaries += _summary_table('By group', agg, 'group')
         summaries += _summary_table('By size tier', agg, 'tier', keyfn=_tier_rank)
         summaries += _summary_table('By direction', agg, 'direction')
+        summaries += _summary_table('By value', agg, 'vbucket')
 
     trades.sort(key=lambda t: (t['peak'] is not None, t['peak']), reverse=True)
     body = ''
