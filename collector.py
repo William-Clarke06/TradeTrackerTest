@@ -4,7 +4,7 @@ import requests
 SOURCES = { #Dictrionary of page links.
     'cluster_buys': 'http://openinsider.com/latest-cluster-buys',
     'insider_buys': 'http://openinsider.com/insider-purchases-25k',
-    'penny_buys': 'http://openinsider.com/latest-penny-stocks-buys',
+    'penny_buys': 'http://openinsider.com/latest-penny-stock-buys',
     'insider_sells': 'http://openinsider.com/latest-insider-sales-100k',
 
 }
