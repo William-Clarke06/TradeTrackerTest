@@ -1,0 +1,42 @@
+name: daily-tradetracker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 2-6'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tradetracker
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (with the current trades.db)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip list
+
+      - name: Run the pipeline
+        run: python store.py
+
+      - name: Commit updated data + report
+        run: |
+          git config user.name  "tradetracker-bot"
+          git config user.email "actions@github.com"
+          git add trades.db report.html
+          git diff --staged --quiet || git commit -m "daily run $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
