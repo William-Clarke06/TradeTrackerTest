@@ -41,9 +41,21 @@ def create_table():
             peak_price      REAL,          -- most FAVOURABLE price since entry
             peak_datetime   TEXT,
             latest_price    REAL,
-            latest_datetime TEXT,
-            UNIQUE(ticker, trade_date, trade_type, insider_qty, source_group)
+            latest_datetime TEXT
         )
+    ''')
+    # Identity split by group: cluster rows are live aggregates whose quantity
+    # drifts, so they're keyed WITHOUT insider_qty (one row per ticker/day/type).
+    # Everything else keeps insider_qty so distinct same-day trades stay separate.
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_cluster
+        ON trades(ticker, trade_date, trade_type, source_group)
+        WHERE source_group = 'cluster_buys'
+    ''')
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_single
+        ON trades(ticker, trade_date, trade_type, insider_qty, source_group)
+        WHERE source_group <> 'cluster_buys'
     ''')
     conn.commit()
     conn.close()
@@ -109,6 +121,12 @@ def save_trades(trades):
         if direction is None:            # not a clean P/S trade -> drop it
             skipped += 1
             continue
+        price = clean_number(t['price'])
+        qty   = clean_number(t['qty'])
+        value = clean_number(t['value'])
+        if not price or not qty:         # HNGE-style $0 / 0-share placeholder -> drop
+            skipped += 1
+            continue
         cursor.execute('''
             INSERT OR IGNORE INTO trades
                 (source_group, ticker, trade_type, direction, trade_date,
@@ -121,10 +139,10 @@ def save_trades(trades):
             t['trade_type'],
             direction,
             t['trade_date'],
-            t['filing_date'],                 # collector still emits 'filing_date'
-            clean_number(t['price']),
-            clean_number(t['qty']),
-            clean_number(t['value']),
+            t['filing_date'],
+            price,
+            qty,
+            value,
             today,
         ))
         inserted += cursor.rowcount
@@ -150,7 +168,10 @@ def fill_entry_prices():
             "UPDATE trades SET entry_price = ?, entry_method = ?, entry_datetime = ? WHERE id = ?",
             (price, method, entry_dt, trade_id),
         )
-        print(f"  entry {ticker}: {price} ({method}) @ {entry_dt}")
+        if price is None:
+            print(f"  entry {ticker}: not tradeable yet (filed after close; fills next session)")
+        else:
+            print(f"  entry {ticker}: {price:.2f} ({method}) @ {entry_dt}")
 
     conn.commit()
     conn.close()
@@ -263,8 +284,12 @@ def show_cards():
     for c in cards:
         tag = 'LONG ' if c['direction'] == 'long' else 'SHORT'
         frozen = '' if c['status'] == 'active' else '  (closed)'
+        adr = ''
+        if c['iprice'] and c['entry'] and \
+           max(c['iprice'], c['entry']) / min(c['iprice'], c['entry']) > 3:
+            adr = '   [insider price basis differs from market — ADR?]'
         print(f"\n{c['ticker']:6} {tag} {c['group']:13} {c['tier']:9}{frozen}")
-        print(f"  insider   {c['ttype']:12} qty {c['iqty']:>10}  @ {c['iprice']}  (${c['ivalue']:,.0f})")
+        print(f"  insider   {c['ttype']:12} qty {c['iqty']:>10}  @ {c['iprice']}  (${c['ivalue']:,.0f}){adr}")
         print(f"  filed     {c['filing_dt']}")
         print(f"  entry     {c['entry']:9.2f}  @ {c['entry_dt']}")
         print(f"  peak      {c['peak']:9.2f}  @ {c['peak_dt']}   {c['peak_pct']:+.2f}%"
@@ -351,6 +376,8 @@ def run(update_only=False):
     fill_latest_prices()
     show_cards()
     show_averages()
+    from report import write_report # imported here to avoid circular import
+    write_report()
 
 
 if __name__ == '__main__':

@@ -1,6 +1,11 @@
+import logging
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+
+# yfinance logs "Data doesn't exist..." whenever we ask for a session that hasn't
+# happened yet — expected for after-hours filings that defer to the next open.
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 
 def classify_trade_type(trade_type):
@@ -48,15 +53,23 @@ def get_entry_price(ticker, filing_datetime):
             entry_time = after.index[0].strftime('%Y-%m-%d %H:%M')
             return float(after['Open'].iloc[0]), 'minute', entry_time
 
-    # --- Fallback: next available daily open at/after the filing day ---
+    # --- Fallback: first daily session whose OPEN is at/after the filing ---
+    # Don't trust `start` — on weekends yfinance hands back the prior close, which
+    # would be look-ahead. Instead check each returned bar: accept the first
+    # session whose 09:30 open is at/after the filing moment. If none qualify yet
+    # (e.g. after-hours filing, next session hasn't happened), return None and let
+    # a later run fill it.
     daily = yf.Ticker(ticker).history(
         start=start.strftime('%Y-%m-%d'),
-        end=(start + timedelta(days=7)).strftime('%Y-%m-%d'),
+        end=(start + timedelta(days=9)).strftime('%Y-%m-%d'),
         interval='1d',
     )
     if not daily.empty:
-        entry_time = daily.index[0].strftime('%Y-%m-%d')
-        return float(daily['Open'].iloc[0]), 'daily_fallback', entry_time
+        filing_ts = pd.Timestamp(filing_dt, tz=daily.index.tz)
+        for ts in daily.index:
+            session_open = ts.replace(hour=9, minute=30)
+            if session_open >= filing_ts:
+                return float(daily.loc[ts, 'Open']), 'daily_fallback', ts.strftime('%Y-%m-%d')
 
     return None, None, None
 
