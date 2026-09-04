@@ -70,6 +70,29 @@ def _tier_rank(t):
     return {'<$1': 0, '$1-4.99': 1, '$5-14.99': 5, '$15-49.99': 15, '$50+': 50}.get(t, 999)
 
 
+def _dedupe(trades):
+    """
+    One row per real trade. Per (ticker, trade_date, trade_type): keep the
+    individual-page rows (de-duplicated by quantity); keep cluster rows only if
+    that event has no individual row at all. Different quantities are treated as
+    genuinely different trades and kept separate.
+    """
+    groups = {}
+    for t in trades:
+        groups.setdefault((t['tk'], t['td'], t['tt']), []).append(t)
+    out = []
+    for _, g in groups.items():
+        indiv = [t for t in g if t['grp'] != 'cluster_buys']
+        pool = indiv if indiv else g
+        seen = set()
+        for t in pool:
+            if t['iq'] in seen:
+                continue
+            seen.add(t['iq'])
+            out.append(t)
+    return out
+
+
 def _pct_cell(v):
     if v is None:
         return '<td class="mono" data-sort=""></td>'
@@ -124,20 +147,25 @@ def write_report(path=REPORT_PATH):
     pending = cur.fetchone()[0]
     conn.close()
 
+    # one row per real trade for every view except By-group (which keeps all rows)
+    uniq = _dedupe(trades)
+
     agg = [dict(group=t['grp'], direction=t['dr'], tier=t['tier'],
-                vbucket=t['vbucket'],
-                cur=t['cur'], peak=t['peak'], days=t['days']) for t in trades]
+                vbucket=t['vbucket'], cur=t['cur'], peak=t['peak'], days=t['days'])
+           for t in uniq]
+    agg_all = [dict(group=t['grp'], cur=t['cur'], peak=t['peak'], days=t['days'])
+               for t in trades]
     summaries = ''
     if agg:
         summaries += _summary_table('Overall', [{**a, 'group': 'ALL'} for a in agg], 'group')
-        summaries += _summary_table('By group', agg, 'group')
+        summaries += _summary_table('By group', agg_all, 'group')
         summaries += _summary_table('By size tier', agg, 'tier', keyfn=_tier_rank)
         summaries += _summary_table('By direction', agg, 'direction')
         summaries += _summary_table('By value', agg, 'vbucket')
 
-    trades.sort(key=lambda t: (t['peak'] is not None, t['peak']), reverse=True)
+    uniq.sort(key=lambda t: (t['peak'] is not None, t['peak']), reverse=True)
     body = ''
-    for t in trades:
+    for t in uniq:
         rowcls = ' class="closed"' if t['st'] != 'active' else ''
         badge = f'<span class="badge {t["dr"]}">{t["dr"].upper()}</span>'
         body += (f'<tr{rowcls}>'
@@ -171,14 +199,14 @@ def write_report(path=REPORT_PATH):
         f'<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>TradeTracker Report</title><style>{_CSS}</style></head><body>'
         f'<header><h1>TradeTracker &mdash; Insider Trade Report</h1>'
-        f'<div class="sub">Generated {gen} &middot; {len(trades)} priced trades{pend_line}</div></header>'
+        f'<div class="sub">Generated {gen} &middot; {len(uniq)} unique trades{pend_line}</div></header>'
         f'<div class="wrap"><div class="summary">{summaries}</div>'
         f'<div class="tbl-scroll"><table class="trades"><thead><tr>{thead}</tr></thead>'
         f'<tbody>{body}</tbody></table></div></div>'
         f'<script>{_JS}</script></body></html>')
     with open(path, 'w', encoding='utf-8') as f:
         f.write(html)
-    print(f"Wrote {path} ({len(trades)} trades).")
+    print(f"Wrote {path} ({len(uniq)} unique of {len(trades)} rows).")
 
 
 if __name__ == '__main__':

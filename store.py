@@ -110,6 +110,47 @@ def days_between(entry_datetime, other_datetime):
     return (o - e).days
 
 
+def purge_corrupt():
+    """Delete rows whose insider price is nonsensical vs market (>50x either way)."""
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM trades
+        WHERE insider_price IS NOT NULL AND entry_price IS NOT NULL AND entry_price > 0
+          AND (insider_price / entry_price > 50 OR entry_price / insider_price > 50)
+    """)
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    if n:
+        print(f"Purged {n} corrupt-price row(s).")
+
+
+def dedupe_trades(rows, keyfn):
+    """
+    Collapse the same real trade appearing on multiple source pages to one row.
+    keyfn(r) returns (ticker, trade_date, trade_type, insider_qty, source_group).
+    Per event (ticker+trade_date+trade_type): use the individual-page rows,
+    de-duplicated by quantity; keep a cluster row only if that event has no
+    individual row at all. Genuinely different trades (different qty) stay separate.
+    """
+    groups = {}
+    for r in rows:
+        tk, td, tt, q, grp = keyfn(r)
+        groups.setdefault((tk, td, tt), []).append((q, grp, r))
+    out = []
+    for _, g in groups.items():
+        indiv = [x for x in g if x[1] != 'cluster_buys']
+        pool = indiv if indiv else g
+        seen = set()
+        for q, grp, r in pool:
+            if q in seen:
+                continue
+            seen.add(q)
+            out.append(r)
+    return out
+
+
 # ----------------------------------------------------------------------------
 # ingest
 # ----------------------------------------------------------------------------
@@ -335,16 +376,18 @@ def show_averages():
     conn = connect()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT source_group, direction, entry_price, entry_datetime,
+        SELECT ticker, trade_date, trade_type, insider_qty, source_group,
+               direction, entry_price, entry_datetime,
                peak_price, peak_datetime, latest_price, insider_value
         FROM trades
         WHERE entry_price IS NOT NULL AND latest_price IS NOT NULL
     """)
     data = []
-    for group, direction, entry, entry_dt, peak, peak_dt, latest, insider_value in cursor.fetchall():
+    for (ticker, trade_date, trade_type, qty, group, direction, entry, entry_dt,
+         peak, peak_dt, latest, insider_value) in cursor.fetchall():
         data.append({
-            'group': group,
-            'direction': direction,
+            'ticker': ticker, 'trade_date': trade_date, 'trade_type': trade_type,
+            'qty': qty, 'group': group, 'direction': direction,
             'tier': size_tier(entry),
             'vbucket': value_bucket(insider_value),
             'cur': pct_move(entry, latest, direction),
@@ -357,17 +400,20 @@ def show_averages():
         print("\nNo priced trades to average yet.")
         return
 
+    # de-duplicated set for the non-group views (each real trade counted once)
+    uniq = dedupe_trades(data, lambda d: (d['ticker'], d['trade_date'],
+                                          d['trade_type'], d['qty'], d['group']))
+
     print("\ncur % = entry→latest, peak % = entry→best move (signed for direction)")
     print("days→peak = avg calendar days from buy-in (FPTP) to the best price")
 
-    # whole-DB total across every priced trade
-    _header("Overall (all priced trades):")
-    _stats_line("ALL", data)
+    _header("Overall (unique trades):")
+    _stats_line("ALL", uniq)
 
-    _print_breakdown("By group:", data, 'group')
-    _print_breakdown("By size tier:", data, 'tier')
-    _print_breakdown("By direction:", data, 'direction')
-    _print_breakdown("By value:", data, 'vbucket')   # <-- add this line
+    _print_breakdown("By group (all rows):", data, 'group')
+    _print_breakdown("By size tier:", uniq, 'tier')
+    _print_breakdown("By direction:", uniq, 'direction')
+    _print_breakdown("By value:", uniq, 'vbucket')
 
 
 # ----------------------------------------------------------------------------
@@ -383,6 +429,7 @@ def run(update_only=False):
         from collector import collect          # needs collector's module-level
         save_trades(collect())                 # scrape moved under __main__ (see note)
     fill_entry_prices()
+    purge_corrupt()
     age_out(TEST_WINDOW_DAYS)
     fill_latest_prices()
     show_cards()
