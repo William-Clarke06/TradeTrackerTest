@@ -1,4 +1,4 @@
-yfinance
+yfinance==1.7.0
 pandas
 beautifulsoup4
 requests
