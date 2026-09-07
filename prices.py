@@ -8,6 +8,34 @@ from datetime import datetime, timedelta
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 
+def _safe_history(ticker_or_tk, **kwargs):
+    """
+    Fetch price history without ever raising.
+
+    yfinance leaks raw exceptions (KeyError: 'tradingPeriods',
+    'currentTradingPeriod', 'exchangeTimezoneName', rate-limit errors, ...)
+    whenever Yahoo hands back partial or empty metadata — delisted tickers,
+    instruments with no intraday data, throttling, or a transient hiccup. One
+    such failure inside a single ticker used to abort the whole run. Here we
+    swallow it and return an EMPTY DataFrame, so every caller hits its existing
+    `.empty` path: defer, leave the price NULL, retry next cycle — exactly how a
+    legitimately-missing session is already handled.
+
+    Accepts either a ticker string or an existing yf.Ticker (so callers that
+    reuse a Ticker keep its cached cookie/crumb).
+    """
+    tk = ticker_or_tk if isinstance(ticker_or_tk, yf.Ticker) else yf.Ticker(ticker_or_tk)
+    try:
+        df = tk.history(**kwargs)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "history failed for %s (%s: %s); treating as no data",
+            getattr(tk, 'ticker', ticker_or_tk), type(e).__name__, e,
+        )
+        return pd.DataFrame()
+    return df if df is not None else pd.DataFrame()
+
+
 def classify_trade_type(trade_type):
     """
     Map an openinsider trade type to a trade direction, or None to drop the row.
@@ -40,7 +68,8 @@ def get_entry_price(ticker, filing_datetime):
     # --- Try minute data (only works within ~30 days of now) ---
     start = filing_dt.date()
     end = start + timedelta(days=2)
-    minute = yf.Ticker(ticker).history(
+    minute = _safe_history(
+        ticker,
         start=start.strftime('%Y-%m-%d'),
         end=end.strftime('%Y-%m-%d'),
         interval='1m',
@@ -59,7 +88,8 @@ def get_entry_price(ticker, filing_datetime):
     # session whose 09:30 open is at/after the filing moment. If none qualify yet
     # (e.g. after-hours filing, next session hasn't happened), return None and let
     # a later run fill it.
-    daily = yf.Ticker(ticker).history(
+    daily = _safe_history(
+        ticker,
         start=start.strftime('%Y-%m-%d'),
         end=(start + timedelta(days=9)).strftime('%Y-%m-%d'),
         interval='1d',
@@ -81,7 +111,8 @@ def _entry_day_extreme(tk, entry_dt, entry_date, is_long):
     after entry. Returns (price, 'YYYY-MM-DD HH:MM') or (None, None) when Yahoo
     no longer serves minute data for that day (~30 days old).
     """
-    m = tk.history(
+    m = _safe_history(
+        tk,
         start=entry_date.strftime('%Y-%m-%d'),
         end=(entry_date + timedelta(days=1)).strftime('%Y-%m-%d'),
         interval='1m',
@@ -141,7 +172,7 @@ def get_price_stats(ticker, entry_datetime, entry_method, direction):
         entry_dt = datetime.strptime(entry_datetime[:10], '%Y-%m-%d')
     entry_date = entry_dt.date()
 
-    daily = tk.history(start=entry_date.strftime('%Y-%m-%d'), interval='1d')
+    daily = _safe_history(tk, start=entry_date.strftime('%Y-%m-%d'), interval='1d')
     if daily.empty:
         return None
 
@@ -171,7 +202,7 @@ def get_price_stats(ticker, entry_datetime, entry_method, direction):
     # Freshen 'latest' with an intraday tick; let today's live extreme (a
     # post-entry day) improve the peak. Gated on today > entry_date so we never
     # count a pre-entry tick on the entry day.
-    intraday = tk.history(period='1d', interval='1m')
+    intraday = _safe_history(tk, period='1d', interval='1m')
     if not intraday.empty:
         latest_price = float(intraday['Close'].iloc[-1])
         latest_date = intraday.index[-1].strftime('%Y-%m-%d %H:%M')
