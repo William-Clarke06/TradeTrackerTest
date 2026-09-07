@@ -25,6 +25,7 @@ def _safe_history(ticker_or_tk, **kwargs):
     reuse a Ticker keep its cached cookie/crumb).
     """
     tk = ticker_or_tk if isinstance(ticker_or_tk, yf.Ticker) else yf.Ticker(ticker_or_tk)
+    kwargs.setdefault('auto_adjust', True)   # <-- add: deterministic split-adjusted prices
     try:
         df = tk.history(**kwargs)
     except Exception as e:
@@ -34,6 +35,28 @@ def _safe_history(ticker_or_tk, **kwargs):
         )
         return pd.DataFrame()
     return df if df is not None else pd.DataFrame()
+
+def cumulative_split_factor(tk, since_date):
+    """
+    Product of split ratios that took effect AFTER `since_date`.
+
+    With auto_adjust=True a fresh history is in CURRENT (post-split) share units,
+    while the frozen entry_price is in entry-era units. Multiplying a current-units
+    price by this factor converts it back to entry-era units, so entry vs peak/latest
+    are compared in one regime instead of mixing pre- and post-split scales.
+    Returns 1.0 when there are no later splits (the common case) or on lookup failure.
+    """
+    try:
+        splits = tk.splits
+    except Exception:
+        return 1.0
+    if splits is None or len(splits) == 0:
+        return 1.0
+    factor = 1.0
+    for ts, ratio in splits.items():
+        if ts.date() > since_date and ratio:
+            factor *= float(ratio)
+    return factor
 
 
 def classify_trade_type(trade_type):
@@ -216,11 +239,19 @@ def get_price_stats(ticker, entry_datetime, entry_method, direction):
     if peak_price is None:
         peak_price, peak_date = latest_price, latest_date
 
+    # Re-express fresh (current-units) values into entry-era units so they line
+    # up with the frozen entry_price across any split that occurred after entry.
+    factor = cumulative_split_factor(tk, entry_date)
+    if factor != 1.0:
+        peak_price *= factor
+        latest_price *= factor
+
     return {
         'latest_price': latest_price,
         'latest_date':  latest_date,
         'peak_price':   peak_price,
         'peak_date':    peak_date,
+        'split_factor': factor,          # <-- add this line
     }
 
 

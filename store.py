@@ -278,9 +278,13 @@ def fill_latest_prices():
 
         peak_price = stats['peak_price']
         peak_dt = stats['peak_date']
+        split_factor = stats.get('split_factor', 1.0)
 
-        # running best: keep the stored peak if it's still the more favourable one
-        if old_peak is not None:
+        # running best across runs — but only while units are stable. If a split
+        # happened after entry, the fresh values are now in entry-era units while
+        # any stored peak is still in the old scale, so trust the fresh one and
+        # let the stored peak heal.
+        if old_peak is not None and split_factor == 1.0:
             old_is_better = (old_peak >= peak_price) if direction == 'long' \
                             else (old_peak <= peak_price)
             if old_is_better:
